@@ -27,6 +27,8 @@ public class Config {
         public List<String> excludePatterns = new ArrayList<>();
         public boolean skipExisting = false;
         public boolean resumeDownload = false;
+        // New: allow downloading directly from HTTP/HTTPS links (not SFTP)
+        public boolean downloadFromLinks = false;
     }
     
     // Extraction Settings
@@ -126,8 +128,6 @@ public class Config {
                     config.sftp.authTimeout = getInt(sftpData, "authTimeout", config.sftp.authTimeout);
                 }
             }
-            
-            // Parse Download settings
             if (data.containsKey("download")) {
                 Map<String, Object> dlData = (Map<String, Object>) data.get("download");
                 if (dlData != null) {
@@ -139,6 +139,8 @@ public class Config {
                     config.download.excludePatterns = getStringList(dlData, "excludePatterns", config.download.excludePatterns);
                     config.download.skipExisting = getBoolean(dlData, "skipExisting", config.download.skipExisting);
                     config.download.resumeDownload = getBoolean(dlData, "resumeDownload", config.download.resumeDownload);
+                    // Parse new option for downloading from HTTP/HTTPS links
+                    config.download.downloadFromLinks = getBoolean(dlData, "downloadFromLinks", config.download.downloadFromLinks);
                 }
             }
             

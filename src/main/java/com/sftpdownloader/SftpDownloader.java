@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.net.*;
 import java.nio.file.*;
 import java.security.Security;
 import java.util.*;
@@ -60,18 +61,19 @@ public class SftpDownloader {
                 System.out.println("Choose an option:");
                 System.out.println("1. SFTP Download");
                 System.out.println("2. Extract File");
+                System.out.println("3. Download from link");
                 System.out.println("0. Exit");
                 // Ensure menu is flushed so prompts appear immediately in all consoles (Pterodactyl web console, pipes, etc.)
                 System.out.flush();
                 String choice = promptLine(scanner, "Enter choice: ", true).trim();
-
+    
                 if ("1".equals(choice)) {
                     System.out.println("\n--- SFTP Download ---");
-
+    
                     // Require host input first
                     String host = promptLine(scanner, "Enter host: ", true).trim();
                     config.sftp.host = host;
-
+    
                     // Port (optional, defaults used if blank)
                     String portStr = promptLine(scanner, "Enter port (press Enter to use " + config.sftp.port + "): ", false).trim();
                     if (!portStr.isEmpty()) {
@@ -81,11 +83,11 @@ public class SftpDownloader {
                             System.out.println("Invalid port, using configured/default port: " + config.sftp.port);
                         }
                     }
-
+    
                     // Username (optional)
                     String user = promptLine(scanner, "Enter username (press Enter to use configured/default): ", false).trim();
                     if (!user.isEmpty()) config.sftp.username = user;
-
+    
                     // Password (optional) - prefer console if available for hidden input
                     String pwd = "";
                     if (console != null) {
@@ -95,17 +97,17 @@ public class SftpDownloader {
                         pwd = promptLine(scanner, "Enter password (press Enter to use configured/default): ", false);
                     }
                     if (!pwd.isEmpty()) config.sftp.password = pwd;
-
+    
                     // Remote file (optional)
                     String remoteFile = promptLine(scanner, "Enter file path to download (press Enter to use configured/default): ", false).trim();
                     if (!remoteFile.isEmpty()) {
                         config.download.remoteFile = remoteFile;
                         config.download.downloadAll = false;
                     }
-
+    
                     String localDir = promptLine(scanner, "Enter local directory (press Enter for current directory or configured/default): ", false).trim();
                     if (!localDir.isEmpty()) config.download.localDirectory = localDir;
-
+    
                     System.out.print("Downloading file... ");
                     System.out.flush();
                     try {
@@ -115,7 +117,27 @@ public class SftpDownloader {
                         System.out.println("Failed: " + e.getMessage());
                         logger.error("Download failed", e);
                     }
-
+    
+                } else if ("3".equals(choice)) {
+                    System.out.println("\n--- Download from Link ---");
+                    String link = promptLine(scanner, "Enter URL to download: ", true).trim();
+                    if (link.isEmpty()) {
+                        System.out.println("No URL specified.");
+                    } else {
+                        String localDirStr = promptLine(scanner, "Enter local directory (press Enter for current directory or configured/default): ", false).trim();
+                        if (!localDirStr.isEmpty()) config.download.localDirectory = localDirStr;
+                        Path localDirPath = Paths.get(config.download.localDirectory).toAbsolutePath();
+                        System.out.print("Downloading... ");
+                        System.out.flush();
+                        try {
+                            downloader.downloadFromUrl(link, localDirPath);
+                            System.out.println("Done!");
+                        } catch (Exception e) {
+                            System.out.println("Failed: " + e.getMessage());
+                            logger.error("Download from link failed", e);
+                        }
+                    }
+    
                 } else if ("2".equals(choice)) {
                     System.out.println("\n--- File Extraction ---");
                     String fileName = promptLine(scanner, "Enter file name (path to archive): ", true).trim();
@@ -134,7 +156,7 @@ public class SftpDownloader {
                             logger.error("Extraction failed", e);
                         }
                     }
-
+    
                 } else if ("0".equals(choice) || "q".equalsIgnoreCase(choice)) {
                     System.out.println("Exiting.");
                     break;
@@ -142,7 +164,7 @@ public class SftpDownloader {
                     System.out.println("Invalid choice, please try again.");
                 }
             }
-
+    
             scanner.close();
         } catch (Exception e) {
             logger.error("Fatal error: {}", e.getMessage(), e);
@@ -376,17 +398,114 @@ public class SftpDownloader {
                 // Update progress if configured
                 if (config.logging.showProgress) {
                     long currentTime = System.currentTimeMillis();
-                    if (currentTime - lastProgressUpdate > config.logging.progressInterval || 
+                    if (currentTime - lastProgressUpdate > config.logging.progressInterval ||
                         totalBytesRead == fileSize) {
                         double percentage = (totalBytesRead * 100.0) / fileSize;
-                        logger.info("Progress: {}/{} bytes ({:.1f}%)", 
+                        logger.info("Progress: {}/{} bytes ({:.1f}%)",
                                   totalBytesRead, fileSize, percentage);
                         lastProgressUpdate = currentTime;
                     }
                 }
             }
             
-            logger.info("✓ Downloaded successfully: {} ({} bytes)", remoteFile, totalBytesRead);
+            logger.info("Downloaded successfully: {} ({} bytes)", remoteFile, totalBytesRead);
+        }
+    }
+    
+    /**
+     * Download a file from an HTTP/HTTPS link into the specified local directory.
+     * Uses Content-Disposition or the URL path to determine a filename; falls back to a timestamped name if none.
+     */
+    private void downloadFromUrl(String link, Path localDir) throws IOException {
+        URL url = new URL(link);
+
+        // Ensure local directory exists
+        if (!Files.exists(localDir)) {
+            Files.createDirectories(localDir);
+        }
+
+        String filename = null;
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setInstanceFollowRedirects(true);
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(60000);
+
+        try {
+            // Connect to populate headers (handles servers that require connect before header access)
+            conn.connect();
+
+            // Try Content-Disposition header first
+            String contentDisp = conn.getHeaderField("Content-Disposition");
+            if (contentDisp != null) {
+                for (String part : contentDisp.split(";")) {
+                    part = part.trim();
+                    if (part.toLowerCase().startsWith("filename=")) {
+                        filename = part.substring(part.indexOf('=') + 1).trim().replaceAll("^\"|\"$", "");
+                        break;
+                    }
+                }
+            }
+
+            // Fallback to URL path
+            if (filename == null || filename.trim().isEmpty()) {
+                try {
+                    URI uri = url.toURI();
+                    String path = uri.getPath();
+                    if (path != null && !path.trim().isEmpty() && !path.endsWith("/")) {
+                        filename = Paths.get(path).getFileName().toString();
+                    }
+                } catch (Exception e) {
+                    // ignore and fallback
+                }
+            }
+
+            if (filename == null || filename.trim().isEmpty()) {
+                filename = "download-" + System.currentTimeMillis();
+            }
+
+            Path localFile = localDir.resolve(filename);
+
+            // Ensure parent directory for the target file exists (handles race/permissions)
+            Path parent = localFile.getParent();
+            if (parent != null && !Files.exists(parent)) {
+                Files.createDirectories(parent);
+            }
+
+            if (config.download.skipExisting && Files.exists(localFile)) {
+                logger.info("Skipping existing file: {}", localFile);
+                return;
+            }
+
+            // Check HTTP response code before reading
+            int code = conn.getResponseCode();
+            if (code >= 400) {
+                throw new IOException("HTTP error " + code + " while downloading " + link);
+            }
+
+            logger.info("Downloading {} -> {}", link, localFile);
+
+            try (InputStream in = conn.getInputStream();
+                 OutputStream out = Files.newOutputStream(localFile)) {
+                byte[] buffer = new byte[config.advanced.bufferSize];
+                int read;
+                long total = 0;
+                long lastUpdate = System.currentTimeMillis();
+                while ((read = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, read);
+                    total += read;
+                    if (config.logging.showProgress) {
+                        long now = System.currentTimeMillis();
+                        if (now - lastUpdate > config.logging.progressInterval) {
+                            logger.info("Downloaded {} bytes...", total);
+                            lastUpdate = now;
+                        }
+                    }
+                }
+            }
+
+            logger.info("Downloaded successfully: {} ({} bytes)", localFile.getFileName(), Files.size(localFile));
+        } finally {
+            conn.disconnect();
         }
     }
     
@@ -400,6 +519,8 @@ public class SftpDownloader {
                 extractTar(archiveFile, extractDir);
             } else if (filename.endsWith(".gz")) {
                 extractGz(archiveFile, extractDir);
+            } else if (filename.endsWith(".zip")) {
+                extractZip(archiveFile, extractDir);
             } else {
                 logger.warn("Unsupported archive format: {}", filename);
             }
@@ -472,7 +593,7 @@ public class SftpDownloader {
             }
         }
         
-        logger.info("✓ Extracted {} files ({} bytes) to {}", 
+        logger.info("Extracted {} files ({} bytes) to {}",
                    filesExtracted, totalBytesExtracted, targetDir);
     }
     
@@ -481,7 +602,7 @@ public class SftpDownloader {
         // Similar to extractTarGz but without gzip decompression
         // Implementation omitted for brevity
     }
-    
+
     private void extractGz(Path gzFile, Path extractDir) throws IOException {
         logger.info("Extracting gz file: {}", gzFile.getFileName());
         String outputName = gzFile.getFileName().toString().replaceAll("\\.gz$", "");
@@ -498,7 +619,63 @@ public class SftpDownloader {
             }
         }
         
-        logger.info("✓ Extracted to: {}", outputFile);
+        logger.info("Extracted to: {}", outputFile);
+    }
+    
+    private void extractZip(Path zipFile, Path extractDir) throws IOException {
+        logger.info("Extracting zip archive: {}", zipFile.getFileName());
+        
+        Path targetDir = extractDir;
+        if (config.extraction.createSubdirectory) {
+            String dirName = zipFile.getFileName().toString().replaceAll("\\.zip$", "");
+            targetDir = extractDir.resolve(dirName);
+            Files.createDirectories(targetDir);
+        } else {
+            Files.createDirectories(targetDir);
+        }
+        
+        int filesExtracted = 0;
+        long totalBytesExtracted = 0;
+        byte[] buffer = new byte[config.advanced.bufferSize];
+        
+        try (InputStream fis = Files.newInputStream(zipFile);
+             BufferedInputStream bis = new BufferedInputStream(fis);
+             java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(bis)) {
+            
+            java.util.zip.ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                Path entryPath = targetDir.resolve(entry.getName());
+                
+                // Security check: prevent zip-slip
+                if (!entryPath.normalize().startsWith(targetDir.normalize())) {
+                    logger.warn("Skipping suspicious zip entry: {}", entry.getName());
+                    zis.closeEntry();
+                    continue;
+                }
+                
+                if (entry.isDirectory()) {
+                    Files.createDirectories(entryPath);
+                } else {
+                    Files.createDirectories(entryPath.getParent());
+                    try (OutputStream out = Files.newOutputStream(entryPath)) {
+                        int len;
+                        long fileBytes = 0;
+                        while ((len = zis.read(buffer)) != -1) {
+                            out.write(buffer, 0, len);
+                            fileBytes += len;
+                            totalBytesExtracted += len;
+                        }
+                        filesExtracted++;
+                        if (config.logging.showProgress) {
+                            logger.debug("Extracted: {} ({} bytes)", entry.getName(), fileBytes);
+                        }
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+        
+        logger.info("Extracted {} files ({} bytes) to {}", filesExtracted, totalBytesExtracted, targetDir);
     }
     
     private java.util.Set<java.nio.file.attribute.PosixFilePermission> getPosixFilePermissions(int mode) {
